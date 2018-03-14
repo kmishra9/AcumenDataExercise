@@ -1,0 +1,198 @@
+---
+title: "Acumen LLC Data Exercise"
+author: "Kunal Mishra"
+date: "3/10/2018"
+rmd source: https://github.com/kmishra9/AcumenDataExercise.git 
+output:
+  pdf_document: default
+  html_document: default
+---
+Github with .RMD Source: https://github.com/kmishra9/AcumenDataExercise.git
+
+
+### Introduction & Background Information
+1. A large company, Company A, provides health insurance to its employees. 
+2. Every four years, Company A's insurer, InsurAHealth, reviews the health status of the employees.
+    + To do this, InsurAHealth calculates a health score between 0 and 6 for each employee on a quarterly basis
+    + 0 denotes a very health person, and 6 denotes a very sick person
+    + The health score is a proprietary tool used by InsurAHealth. The items that go into its formula are not public. 
+3. This past review cycle, InsurAHealth claimed that the employees at Company A have gotten sicker. The mean health score in Quarter 1 was 3.4, in Quarter 6 it was 3.5, and in Quarter 12, it was 3.9. 
+<!-- 4. Company A has hired you to evaluate InsurAHealth's claim that employees are sicker. To facilitate your analysis, InsurAHealth has provided you with data for 12 quarters that includes 2,000 employees from Company A. Demographic information *is not* part of InsurAHealth's health score calculation.  -->
+
+```{r Setup, message=FALSE,warning=FALSE}
+library(DataExplorer)
+library(data.table)
+library(ggplot2)
+library(reshape2)
+library(dummies)
+
+InsurAHealthData = data.table::fread(input="InsurAHealthData.csv", header=TRUE)
+InsurAHealthData
+```
+##### Initial Observations
+The initial heads and tails of the data indicate that each row is an employee's data for a given quarter, and that the data is sorted by Employee ID, then Quarter, so that all of a unique employee's data is consecutive. We also immediately see that there is a variety of demographic information, including Race, Age, and Sex, all of which is categorical (age could also be considered continuous but it is truncated to years). The only two continuous variables we have are then health score and salary. Another thing I can immediately see is missing values (denoted NA) and health scores that don't correspond with what InsurAHealth claims, with a value of 10.0 exceeding the maximum score of 6.0.
+
+In addition, though the salary column is meant to be a continuous numeric column, it comes in character type due to the '$' and ',' symbols within the numbers. This also makes any standard type casting a bit more difficult, so that will need to be corrected. Finally, column names with spaces in them will make my life just a bit more difficult in this analysis, so that will need to be changed as well.
+
+Let's clean the data:
+```{r Data Cleaning}
+colnames(InsurAHealthData) = c("Observation_Number", "Quarter", 
+                               "Employee_ID", "Sex", 
+                               "Race", "Age", 
+                               "Hospital_Visit_This_Quarter", 
+                               "Salary", "Health_Score")
+
+# Fixing the salary column (string --> numeric)
+salaryColumn = InsurAHealthData[,Salary] 
+str(salaryColumn)
+salaryColumn = gsub("$", "", salaryColumn, fixed=TRUE)
+salaryColumn = gsub(",", "", salaryColumn, fixed=TRUE)
+str(salaryColumn)
+InsurAHealthData$Salary = as.numeric(salaryColumn)
+
+# Converting categorical variables to factors
+InsurAHealthCategorical = InsurAHealthData[, 
+                                           lapply(.SD, as.factor), 
+                                           .SDcols=c("Quarter", "Race", "Sex", "Hospital_Visit_This_Quarter")]
+
+# Converting continuous variables to numeric
+InsurAHealthContinuous = InsurAHealthData[, 
+                                          lapply(.SD, as.numeric), 
+                                          .SDcols=c("Salary", "Health_Score", "Age")]
+
+# Binding all variables back together
+InsurAHealthData = cbind(InsurAHealthContinuous, 
+                         InsurAHealthCategorical, 
+                         InsurAHealthData[,c("Employee_ID", "Observation_Number"), with=FALSE])
+str(InsurAHealthData)
+```
+
+
+### Question 1 - Understanding the Data 
+
+##### a) Are all the values in the data reasonable? Are there missing values? 
+##### b) What are the characteristics of employees at Company A? Do these demographics change over time?
+
+Let's start by answering 1A. We noticed that there were missing and unreasonable values in our first look at the data, but let's first try to figure out how big these issues are.
+```{r Question 1A}
+DataExplorer::plot_missing(InsurAHealthData)
+
+# Looking for unexpected values - discrete data
+DataExplorer::plot_bar(
+    data = InsurAHealthCategorical, 
+    title="Raw Counts of each category"
+)
+
+#Looking for unexpected values - continuous data
+DataExplorer::plot_density(
+    data = InsurAHealthContinuous,
+    title = "Density curves of continuous variables"
+)
+
+#Ensuring Employee_IDs have no more than 12 associated quarters (would be a signal that Employee_IDs are not unique to each employee)
+max(InsurAHealthData[, .N, by=Employee_ID][,N])
+```
+##### Further Observations
+* Missing Data
+    + Most of the missing data is in the Race column with 11% of rows missing a value. When aggregated by Employee_ID, we see that `r nrow(InsurAHealthData[is.na(Race), Employee_ID, by=Employee_ID])/nrow(InsurAHealthData[, Employee_ID, by=Employee_ID])`% of employees are missing a race value.
+    + The Sex column is also missing a negligible amount (<1%) of data. When aggregated by Employee_ID, we see that [PLACEHOLDER]% of employees are missing a race value.
+    + Though it may not be "missing", its worth noting that many employees do not have all 12 quarters worth of data, and for whatever reason employees tend to have more data towards the end of the year. This also tends to be the time of year at which disease transmission (such as Influenza, Norovirus, Rotovirus, Common Cold viruses and more) in the US is highest, so this may be a source of bias in the data. 
+* Unreasonable values
+    + For whatever reason, we see a number of "invalid" health scores of 10.0. This warrants further investigation but could also be attributable to a data entry error (someone added an extra 0 to 1.0) or data corruption. Further analysis should exclude this data in the meantime.
+
+Now, let's look at 1B. 
+
+* Demographics   
+    + The population is fairly evenly split, and the race split is `r InsurAHealthData[!is.na(Race), .N, by=Race][,N]/nrow(InsurAHealthData)` for race 3, 2, and 1 respectively. Age is displaying a nice bell curve with a mean age of `r mean(InsurAHealthData[, Age])` years old.
+
+Now, let's graph plot the characteristics of the population over time:
+```{r Question 1B}
+# Count the number of employees per race, per quarter, then find what percentage that constitutes
+InsurAHealthDataTemporalRacePercentages = 
+    merge(x = InsurAHealthData[!is.na(Race), .(.N), keyby=.(Quarter, Race)],
+          y = InsurAHealthData[!is.na(Race), .(.N), keyby=.(Quarter)],
+          keyby = Quarter
+          )[, .(Quarter, Race, Percentage=N.x/N.y)]
+
+# Graph it temporally
+ggplot(data = InsurAHealthDataTemporalRacePercentages,
+       aes(x=Quarter, y=Percentage, group=Race)) +
+    geom_line(aes(linetype=Race))
+
+# Count the number of employees per sex, per quarter, then find what percentage that constitutes
+InsurAHealthDataTemporalSexPercentages =
+    merge(x = InsurAHealthData[!is.na(Sex), .(.N), keyby=.(Quarter, Sex)],
+          y = InsurAHealthData[!is.na(Sex), .(.N), keyby=.(Quarter)],
+          keyby = Quarter
+          )[, .(Quarter, Sex, Percentage=N.x/N.y)]
+
+# Graph it temporally
+ggplot(data = InsurAHealthDataTemporalSexPercentages,
+       aes(x=Quarter, y=Percentage, group=Sex)) +
+    geom_line(aes(linetype=Sex)) + 
+    scale_linetype_manual(values = c("dashed","solid"),
+                          labels = c("0=Female", "1=Male")) +
+    guides(linetype=guide_legend(reverse = TRUE))
+
+# Find the average age on a quarterly basis
+InsurAHealthDataTemporalMeanAge = InsurAHealthData[, .(MeanAge=mean(Age)), keyby=Quarter]
+
+# Graph it temporally
+ggplot(data = InsurAHealthDataTemporalMeanAge,
+       aes(x=Quarter, y=MeanAge, group=1)) +
+    geom_line()
+```
+Based on these graphs, it is apparent that race has remained relatively stable while the population of employees has swung slightly to become a majority Male after starting out as a majority Female. This swing was fairly small, however. Finally, mean age has increased a little over 3 years, as we would expect over the course of 12 quarters (3 years).
+
+### Question 2 - Exploring Relationships 
+
+##### a) Which characteristics are associated with the health score?
+
+I was initially planning on jumping into this with a quick Principal Components Analysis but my data is composed of several categorical variables and several sources, including [this Stack Overflow post](https://stats.stackexchange.com/questions/159705/would-pca-work-for-boolean-binary-data-types) warned against doing so (even using dummy variables). I am **aware** that other Factor Analysis methods exist for analysis of mixed data, but these currently lie outside my comfort zone and I don't think scrounging around documentation or external packages (such as [FactoMineR](http://factominer.free.fr/)) for a few minutes without understanding the why and how of the math, would be very useful.
+
+Thus, I think using Linear Regression with dummy variables is the way to **quickly** proceed here (though I would probably do a deeper dive into alternative statistical methods in a real analysis), to find what, if any, statistically significant predictors of the health score there are. 
+```{r Question 2A}
+str(InsurAHealthData)
+fitData = InsurAHealthData[!is.na(Race) && !is.na(Sex),-c("Observation_Number", "Employee_ID"), with=FALSE]
+str(fitData)
+
+# Configuring dummy variables for Race 
+fitDummyData = as.data.table(
+    dummies::dummy.data.frame(data = fitData, names = c("Race"))
+    )[,-c("RaceNA")]    # Useless Column - We've excluded data with missing race/sex values, but the factor retains that info 
+str(fitDummyData)
+
+# Fitting a linear regression model
+linearRegressionFit = lm(formula = Health_Score~., 
+                         data = fitDummyData)
+summary(linearRegressionFit)
+```
+As we would expect, increasing Age, being a male, and having a hospital visit are all strong predictors of higher health score. Being Race 1 is also a moderate predictor of higher health scores, and it also seems like people were more likely to have higher health scores during Quarter 12 based on this data. We can corroborate this last interpretation by looking at mean health scores over time, as in Question 1B:
+```{r Question 2A (continued)}
+# Find the average health score on a quarterly basis
+InsurAHealthDataTemporalMeanHealthScore = InsurAHealthData[, .(MeanHealthScore=mean(Health_Score)), keyby=Quarter]
+
+# Graph it temporally
+ggplot(data = InsurAHealthDataTemporalMeanHealthScore,
+       aes(x=Quarter, y=MeanHealthScore, group=1)) +
+    geom_line()
+```
+Yup. That looks about right, and this kind of data would also be useful in the next part. 
+
+### Question 3 - Evaluating the Claim 
+
+##### a) Using the information from Questions 1 & 2, describe how you would evaluate InsurAHealth's claim that employees are getting sicker. First list how you would evaluate the claim. Then, time-permitting, implement the steps you suggested.
+
+At this point, this is a pretty in-depth analysis through the first 2 questions, so I'll try to outline my initial gut feeling, as well as some next steps I would take before giving a concrete evaluation of InsurAHealth's claim to Company A. 
+
+From my initial gut feeling, it does indeed appear that Company A's health is declining. If the graph above charting average Health Scores had less uniform of an upward trend, that would be a far more difficult conclusion to come to, but the increases from quarter-to-quarter far outnumber and outweigh the quarter-to-quarter decreases in health score. In 2A we also saw that being Male and being older were two significant predictors for an increased health score, and our temporal demographic information shows the population increasing in Male percentage and average age.
+
+There are caveats to all of this of course, and I want to outline what is necessary to evaluate the claim.  
+
+1. First, analyzing how much standard error and random variation play into all of this. To that end, I would essentially want to graph the above health score graph, but with confidence intervals at each data point (doable because we have a large sample and the sample std. deviation). Then, if the confidence intervals of Quarter 1 and Quarter 3 overlap, we don't have a statistically significant increase in Health Score.  
+
+2. In a similar vein, it's possible that the average health scores could be rising due to increased age polarization. I didn't specifically look for this in the dataset, but **its possible** (though not necessarily likely) that people joining the company were simply more likely to be older or younger (i.e. instead of 3 people joining at ages 29, 30, 31, a situation where 3 people join at 20, 30, 40). In this age polarization scenario, health score may exponentially increase based on age, so ensuring that this age polarization phenomena isn't occurring is a good next step. In addition, we might consider stratifying on Age to analyze whether a confounder could be affecting the company's health scores.  
+
+3. Speaking of confounders, I would want to look at other data around this time to understand whether other factors could be causing these trends. For example, in an improving economy, people may become more likely to **utilize** healthcare as they are now able to afford the necessary deductibles and copays. Another example could be looking at whether people with preexisting conditions within the company have worsening conditions, while the rest of the employees remain in stellar or even improving health. Even if a small number of them were to begin to visiting the hospital much more frequently, they may be pulling up the health scores of the entire company for the same reason outlined earlier --- healthy people with good health scores have less weight to pull the average down because there's less room to actually go down (see: right-tailed Health Score distribution for the entire dataset).   
+
+4. One final note I want to make is on the ambiguity of what a Hospital visit actually entails. If it necessarily means that the employee was **admitted** to a hospital during that quarter, then these next points are moot, but otherwise elective procedures, family member visits, screening tests, preventative and primary care, etc. are all cause to "visit" the hospital. Clarifying this variable would be useful.
